@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Net Insight Sneakgo One",
+  "description": "Educational Network Discovery \u0026 Architecture Specification",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
