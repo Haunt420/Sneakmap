@@ -43,6 +43,7 @@ import com.gmap.viewmodel.NetViewModel
 import com.gmap.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -169,20 +170,69 @@ fun NetInsightApp(viewModel: NetViewModel = viewModel()) {
     var diffResultStringList by remember { mutableStateOf<List<String>?>(null) }
     var isDiffingByEngine by remember { mutableStateOf(false) }
 
-    // Periodic simulation stream generator for local server logs
+    // Periodic real network interface and JVM telemetry stream generator
     LaunchedEffect(streamingEnabled) {
         if (streamingEnabled) {
-            streamLogs.add("Ktor Server initialized on local port $activeStreamingPort")
-            streamLogs.add("WebSocket route registered at /ws/scan-stream")
+            streamLogs.add("Telemetry Broadcaster Server initialized on local port $activeStreamingPort")
+            streamLogs.add("WebSockets streaming active connection pool: listening...")
+            
+            // Log actual active network interfaces on start
+            try {
+                val interfaces = java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())
+                for (iface in interfaces) {
+                    if (iface.isUp) {
+                        val ips = java.util.Collections.list(iface.inetAddresses)
+                            .filter { !it.isLoopbackAddress }
+                            .map { it.hostAddress }
+                        if (ips.isNotEmpty()) {
+                            streamLogs.add("Active Interface: ${iface.name} | MTU: ${iface.mtu} | IP: ${ips.joinToString()}")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                streamLogs.add("Error reading interface configurations: ${e.message}")
+            }
+
             while (isActive) {
                 delay(3000)
-                val randomMockLog = when (Random.nextInt(4)) {
-                    0 -> "{\"event\":\"host_up\",\"ip\":\"192.168.1.${Random.nextInt(10, 250)}\",\"ports\":[22,80]}"
-                    1 -> "{\"event\":\"port_discovered\",\"ip\":\"192.168.1.15\",\"port\":3306,\"state\":\"open\"}"
-                    2 -> "{\"event\":\"stream_heartbeat\",\"uptime_seconds\":${System.currentTimeMillis()/1000}}"
-                    else -> "{\"event\":\"scan_progress\",\"percentage_complete\":${Random.nextInt(10, 99)}}"
+                val telemetryFrame = when (Random.nextInt(4)) {
+                    0 -> {
+                        // Real network interface IP check
+                        val activeIps = mutableListOf<String>()
+                        try {
+                            val interfaces = java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())
+                            for (iface in interfaces) {
+                                if (iface.isUp && !iface.isLoopback) {
+                                    activeIps.addAll(java.util.Collections.list(iface.inetAddresses).map { it.hostAddress })
+                                }
+                            }
+                        } catch (e: Exception) {}
+                        "{\"event\":\"interfaces_status\",\"uptime_sec\":${System.currentTimeMillis()/1000},\"active_ips\":${activeIps.joinToString(prefix="[", postfix="]") { "\"$it\"" }}}"
+                    }
+                    1 -> {
+                        // Real hardware core count and thread telemetry
+                        val cores = Runtime.getRuntime().availableProcessors()
+                        val freeMem = Runtime.getRuntime().freeMemory() / (1024 * 1024)
+                        "{\"event\":\"host_resources\",\"available_cpu_cores\":$cores,\"free_jvm_memory_mb\":$freeMem}"
+                    }
+                    2 -> {
+                        // Query the database to stream real statistics
+                        val scanCount = try {
+                            val scansList = viewModel.allScans.first()
+                            scansList.size
+                        } catch(e: Exception) { 0 }
+                        val hostCount = try {
+                            val hostsList = viewModel.allHosts.first()
+                            hostsList.size
+                        } catch(e: Exception) { 0 }
+                        "{\"event\":\"database_telemetry\",\"total_recorded_scans\":$scanCount,\"total_discovered_hosts\":$hostCount}"
+                    }
+                    else -> {
+                        // Standard telemetry heartbeat with actual local timestamp
+                        "{\"event\":\"stream_heartbeat\",\"server_time_ms\":${System.currentTimeMillis()},\"thread_pool_active\":true}"
+                    }
                 }
-                streamLogs.add(0, "[WebSocket Broadcast] $randomMockLog")
+                streamLogs.add(0, "[WebSocket Broadcast] $telemetryFrame")
                 if (streamLogs.size > 25) streamLogs.removeLast()
             }
         } else {
@@ -190,13 +240,36 @@ fun NetInsightApp(viewModel: NetViewModel = viewModel()) {
         }
     }
 
-    // Monitor scanning state from foreground database updates
+    // Monitor scanning state from foreground database updates and trigger real compliance notifications
     LaunchedEffect(allHosts.size) {
         if (isScanning && allHosts.isNotEmpty()) {
-            // Automatically focus on newly discovered nodes to excite user
             val lastAdded = allHosts.lastOrNull()
             if (lastAdded != null) {
                 selectedNodeForDetail = lastAdded
+                
+                if (automationEnabled) {
+                    try {
+                        val ports = viewModel.getPortsForHost(lastAdded.id).first()
+                        for (port in ports) {
+                            if (port.portNumber == 22 && triggerAlertOnSsh) {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "⚠️ COMPLIANCE ALERT: Open SSH port 22 found on ${lastAdded.ipAddress}!",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
+                            if ((port.portNumber == 80 || port.portNumber == 443) && triggerAlertOnHttp) {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "⚠️ COMPLIANCE ALERT: Open Web port ${port.portNumber} found on ${lastAdded.ipAddress}!",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
             }
         }
     }
@@ -384,18 +457,7 @@ fun NetInsightApp(viewModel: NetViewModel = viewModel()) {
                             if (diffScanAId != null && diffScanBId != null) {
                                 isDiffingByEngine = true
                                 coroutineScope.launch {
-                                    delay(800) // Beautiful computation layout delay
-                                    val results = mutableListOf<String>()
-                                    if (diffScanAId == diffScanBId) {
-                                        results.add("[Same Scans] Comparison target is identical. No differences found.")
-                                    } else {
-                                        results.add("Analyzing Node Topologies...")
-                                        results.add("✔ [DIFF SUCCESS] Difference detected in Target Ports:")
-                                        results.add("  ➕ Host [192.168.1.15] discovered open port 3306 (mysql)")
-                                        results.add("  ➕ Host [192.168.1.42] discovered open port 5900 (vnc)")
-                                        results.add("  ➖ Host [192.168.1.254] closed port 23 (telnet)")
-                                        results.add("  ▲ Host [192.168.1.100] OS Fingerprint modified slightly")
-                                    }
+                                    val results = viewModel.compareScans(diffScanAId!!, diffScanBId!!)
                                     diffResultStringList = results
                                     isDiffingByEngine = false
                                 }

@@ -8,6 +8,7 @@ import com.gmap.data.NetDatabase
 import com.gmap.data.PortEntity
 import com.gmap.data.ScanEntity
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class NetViewModel(application: Application) : AndroidViewModel(application) {
@@ -76,5 +77,90 @@ class NetViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    suspend fun compareScans(scanAId: Long, scanBId: Long): List<String> {
+        val results = mutableListOf<String>()
+        
+        if (scanAId == scanBId) {
+            results.add("[Same Scans] Comparison target is identical. No differences found.")
+            return results
+        }
+        
+        results.add("Analyzing Node Topologies for Scans #$scanAId and #$scanBId...")
+        
+        val hostsA = dao.getHostsForScan(scanAId).first()
+        val hostsB = dao.getHostsForScan(scanBId).first()
+        
+        val mapA = hostsA.associateBy { it.ipAddress }
+        val mapB = hostsB.associateBy { it.ipAddress }
+        
+        // Find added hosts
+        val addedIps = mapB.keys - mapA.keys
+        // Find removed hosts
+        val removedIps = mapA.keys - mapB.keys
+        // Common hosts
+        val commonIps = mapA.keys intersect mapB.keys
+        
+        var diffCount = 0
+        
+        if (addedIps.isNotEmpty() || removedIps.isNotEmpty() || commonIps.isNotEmpty()) {
+            results.add("✔ [DIFF SUCCESS] Difference detected in Target Ports/Hosts:")
+        }
+        
+        for (ip in addedIps) {
+            val host = mapB[ip]!!
+            results.add("  ➕ Host [$ip] added (OS: ${host.osGuess ?: "Unknown"})")
+            diffCount++
+            
+            // Also show ports added with this host
+            val ports = dao.getPortsForHost(host.id).first()
+            for (port in ports) {
+                results.add("    ➕ Port ${port.portNumber}/${port.protocol} (${port.service ?: "unknown service"})")
+            }
+        }
+        
+        for (ip in removedIps) {
+            results.add("  ➖ Host [$ip] removed")
+            diffCount++
+        }
+        
+        for (ip in commonIps) {
+            val hostA = mapA[ip]!!
+            val hostB = mapB[ip]!!
+            
+            // Check OS Fingerprint change
+            if (hostA.osGuess != hostB.osGuess) {
+                results.add("  ▲ Host [$ip] OS Fingerprint modified: '${hostA.osGuess ?: "Unknown"}' ➔ '${hostB.osGuess ?: "Unknown"}'")
+                diffCount++
+            }
+            
+            val portsA = dao.getPortsForHost(hostA.id).first()
+            val portsB = dao.getPortsForHost(hostB.id).first()
+            
+            val portsMapA = portsA.associateBy { "${it.portNumber}/${it.protocol}" }
+            val portsMapB = portsB.associateBy { "${it.portNumber}/${it.protocol}" }
+            
+            val addedPorts = portsMapB.keys - portsMapA.keys
+            val removedPorts = portsMapA.keys - portsMapB.keys
+            
+            for (pKey in addedPorts) {
+                val port = portsMapB[pKey]!!
+                results.add("  ➕ Host [$ip] discovered open port ${port.portNumber} (${port.service ?: "unknown"})")
+                diffCount++
+            }
+            
+            for (pKey in removedPorts) {
+                val port = portsMapA[pKey]!!
+                results.add("  ➖ Host [$ip] closed port ${port.portNumber} (${port.service ?: "unknown"})")
+                diffCount++
+            }
+        }
+        
+        if (diffCount == 0) {
+            results.add("No network topological differences detected between Scan #$scanAId and Scan #$scanBId.")
+        }
+        
+        return results
     }
 }
