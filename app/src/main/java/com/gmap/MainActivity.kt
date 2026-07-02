@@ -1111,8 +1111,13 @@ fun HighFidelityTopologyCanvas(
                         n.x += n.vx
                         n.y += n.vy
                         
-                        n.x = n.x.coerceIn(60f, width - 60f)
-                        n.y = n.y.coerceIn(60f, height - 60f)
+                        val minX = 60f
+                        val maxX = (width - 60f).coerceAtLeast(minX)
+                        n.x = n.x.coerceIn(minX, maxX)
+                        
+                        val minY = 60f
+                        val maxY = (height - 60f).coerceAtLeast(minY)
+                        n.y = n.y.coerceIn(minY, maxY)
                     }
                 }
             }
